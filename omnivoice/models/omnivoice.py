@@ -738,7 +738,10 @@ class OmniVoice(PreTrainedModel):
 
         Args:
             ref_audio: File path (str) or ``(waveform, sample_rate)`` tuple.
-                waveform should be a 1-D or 2-D torch.Tensor (channels x samples).
+                ``waveform`` may be a 1-D or 2-D numpy/torch array
+                (channels x samples). The swapped ``(sample_rate, waveform)``
+                ordering (the convention used by Gradio/numpy) is also
+                accepted and normalized internally.
             ref_text: Transcript of the reference audio. If ``None``, the
                 ASR model will be used to auto-transcribe (must call
                 :meth:`load_asr_model` first).
@@ -759,29 +762,44 @@ class OmniVoice(PreTrainedModel):
             ref_wav = load_audio(ref_audio, self.sampling_rate)
         else:
             waveform, sr = ref_audio
+            # The documented contract is (waveform, sample_rate), but the
+            # common audio/Gradio convention is (sample_rate, waveform),
+            # which leaves an int sample rate in ``waveform`` and used to crash
+            # below with "'int' object has no attribute 'ndim'". Detect a
+            # swapped pair (int where an audio array is expected) and
+            # normalize so both orderings are accepted.
+            if isinstance(waveform, (int, np.integer)) and isinstance(
+                sr, np.ndarray
+            ):
+                waveform, sr = sr, waveform
             if isinstance(waveform, torch.Tensor):
                 waveform = waveform.cpu().numpy()
-            # The documented contract is (waveform, sample_rate). A common
-            # mistake — e.g. passing a Gradio ``type="numpy"`` result back to
-            # this method — is the swapped ``(sample_rate, waveform)`` ordering,
-            # which leaves the int sample rate in ``waveform`` and crashes
-            # below with an opaque ``'int' object has no attribute 'ndim'``.
             if not isinstance(waveform, np.ndarray):
                 raise ValueError(
                     "ref_audio as a tuple must be (waveform, sample_rate) with "
                     "a numpy/torch audio array as the first element; got first "
                     f"element of type {type(waveform).__name__}. Pass a file "
-                    "path (str) or a (waveform_array, sample_rate) tuple. For "
-                    "Gradio Audio, set type='filepath'."
+                    "path (str) or a (waveform_array, sample_rate) tuple."
                 )
+            # Normalize dtype to float32 in [-1, 1] (matches load_audio), so
+            # integer audio (e.g. Gradio's int16 numpy output) is scaled right.
+            if np.issubdtype(waveform.dtype, np.integer):
+                waveform = waveform.astype(np.float32) / float(
+                    np.iinfo(waveform.dtype).max
+                )
+            else:
+                waveform = waveform.astype(np.float32)
+            # Normalize shape to (channels, samples), then mono (1, T).
             if waveform.ndim == 1:
                 waveform = waveform[np.newaxis, :]
+            elif waveform.ndim == 2 and waveform.shape[0] > waveform.shape[1]:
+                waveform = waveform.T
             if waveform.shape[0] > 1:
                 waveform = np.mean(waveform, axis=0, keepdims=True)
-            if sr != self.sampling_rate:
+            if int(sr) != self.sampling_rate:
                 waveform = torchaudio.functional.resample(
                     torch.from_numpy(waveform),
-                    orig_freq=sr,
+                    orig_freq=int(sr),
                     new_freq=self.sampling_rate,
                 ).numpy()
             ref_wav = waveform
