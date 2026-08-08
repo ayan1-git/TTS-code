@@ -33,7 +33,7 @@ import torch
 
 from omnivoice import OmniVoice, OmniVoiceGenerationConfig
 from omnivoice.utils.common import get_best_device
-from omnivoice.utils.debug_generate import generate_with_debug
+from omnivoice.utils.debug_generate import tts_handler as _tts_handler
 from omnivoice.utils.lang_map import LANG_NAMES, lang_display_name
 
 
@@ -212,40 +212,17 @@ def build_demo(
         debug_chunks = []
         try:
             if debug:
-                audio, rows, _ = generate_with_debug(
+                (sr, audio), rows = _tts_handler(
                     model=model,
                     text=text.strip(),
                     ref_audio=ref_audio,
                     ref_text=ref_text,
                     instruct=instruct,
-                    mode=mode,
-                    language=lang,
-                    generation_config=gen_config,
-                    speed=float(speed) if speed is not None else 1.0,
-                    duration=float(duration) if duration is not None else 0.0,
-                    gap_ms=float(debug_gap_ms),
+                    gap_ms=int(float(debug_gap_ms)),
                 )
                 waveform = (audio * 32767).astype(np.int16)
-                for r in rows:
-                    debug_rows.append(
-                        [
-                            r["chunk"],
-                            r["est_s"],
-                            r["actual_s"],
-                            r["gen_time_s"],
-                            r["flag"],
-                            r["text_preview"],
-                        ]
-                    )
-                    chunk_path = r["file"]
-                    try:
-                        import soundfile as sf
-
-                        cwav, csr = sf.read(chunk_path, dtype="float32")
-                        debug_chunks.append((csr, cwav))
-                    except Exception:
-                        pass
-                status = f"Done. {len(rows)} chunks."
+                debug_rows = rows
+                status = f"Done. {len(rows)} sentences."
             else:
                 audio = model.generate(**kw)
                 waveform = (audio[0] * 32767).astype(np.int16)
@@ -399,17 +376,12 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         vc_status = gr.Textbox(label="Status / 状态", lines=2)
                         with gr.Accordion("🔍 Debug", open=False):
                             vc_debug = gr.Checkbox(label="Enable debug chunking", value=False)
-                            vc_debug_gap = gr.Slider(0, 600, value=250, step=50, label="Inter-chunk gap (ms)")
+                            vc_debug_gap = gr.Slider(0, 600, value=250, step=50, label="Inter-sentence gap (ms)")
                             vc_debug_table = gr.Dataframe(
-                                headers=["chunk", "est_s", "actual_s", "gen_time_s", "flag", "text_preview"],
-                                label="Chunk durations",
+                                headers=["sentence", "duration_s", "unit"],
+                                label="Sentence details",
                             )
-                            vc_chunk_state = gr.State([])
-
-                            @gr.render(inputs=vc_chunk_state)
-                            def render_vc_chunks(players):
-                                for k, (sr_val, wav_val) in enumerate(players):
-                                    gr.Audio(value=(sr_val, wav_val), label=f"chunk {k}", interactive=False)
+                            vc_debug_chunks = gr.State([])
 
                 def _clone_fn(
                     text, lang, ref_aud, ref_text, instruct, ns, gs, dn, sp, du, pp, po, debug, debug_gap
@@ -450,7 +422,7 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         vc_debug,
                         vc_debug_gap,
                     ],
-                    outputs=[vc_audio, vc_status, vc_debug_table, vc_chunk_state],
+                    outputs=[vc_audio, vc_status, vc_debug_table, vc_debug_chunks],
                 )
 
             # ==============================================================
@@ -496,17 +468,12 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         vd_status = gr.Textbox(label="Status / 状态", lines=2)
                         with gr.Accordion("🔍 Debug", open=False):
                             vd_debug = gr.Checkbox(label="Enable debug chunking", value=False)
-                            vd_debug_gap = gr.Slider(0, 600, value=250, step=50, label="Inter-chunk gap (ms)")
+                            vd_debug_gap = gr.Slider(0, 600, value=250, step=50, label="Inter-sentence gap (ms)")
                             vd_debug_table = gr.Dataframe(
-                                headers=["chunk", "est_s", "actual_s", "gen_time_s", "flag", "text_preview"],
-                                label="Chunk durations",
+                                headers=["sentence", "duration_s", "unit"],
+                                label="Sentence details",
                             )
-                            vd_chunk_state = gr.State([])
-
-                            @gr.render(inputs=vd_chunk_state)
-                            def render_vd_chunks(players):
-                                for k, (sr_val, wav_val) in enumerate(players):
-                                    gr.Audio(value=(sr_val, wav_val), label=f"chunk {k}", interactive=False)
+                            vd_debug_chunks = gr.State([])
 
                 def _build_instruct(groups):
                     """Extract instruct text from UI dropdowns.
@@ -564,7 +531,7 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         vd_debug_gap,
                     ]
                     + vd_groups,
-                    outputs=[vd_audio, vd_status, vd_debug_table, vd_chunk_state],
+                    outputs=[vd_audio, vd_status, vd_debug_table, vd_debug_chunks],
                 )
 
     return demo

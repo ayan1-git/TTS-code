@@ -1,5 +1,15 @@
+"""Debug utilities for sentence-level TTS generation.
+
+This module provides a sentence-by-sentence generation approach to isolate
+issues that may arise from OmniVoice's built-in long-form chunking.
+Instead of sending long text to ``model.generate()`` (which triggers
+internal duration-based chunking), each sentence is generated as a
+separate call with ``audio_chunk_threshold`` set very high.
+"""
+
 import json
 import os
+import re
 import time
 from typing import Any
 
@@ -9,149 +19,170 @@ import soundfile as sf
 from omnivoice import OmniVoiceGenerationConfig
 
 
-SENT_END = {".", "!", "?", "。", "！", "？"}
+SAMPLE_RATE = 24000
+
+SENTENCE_END = {".", "!", "?", "。", "！", "？"}
 
 
-def split_sentences(text: str) -> list[str]:
-    sents, buf = [], ""
-    for ch in text:
-        buf += ch
-        if ch in SENT_END:
-            sents.append(buf.strip())
-            buf = ""
-    if buf.strip():
-        sents.append(buf.strip())
-    return [s for s in sents if s]
+def normalize_punct(text: str) -> str:
+    """Insert a space before every sentence terminator.
+
+    This ensures that when the splitter sees ``word .`` it treats the space
+    as a token boundary, making the sentence-level experiment independent
+    of tokenizer-specific spacing behaviour.
+
+    Example::
+
+        >>> normalize_punct("Hello. Next!")
+        'Hello . Next !'
+    """
+    return re.sub(r"\s*([.!?。！？])", r" \1", text)
 
 
-def est_seconds(text: str, cps: float = 14.0) -> float:
-    return len(text.replace(" ", "")) / cps
+def split_into_sentences(text: str) -> list[str]:
+    """Split text only at sentence-ending punctuation.
+
+    The punctuation mark remains attached to the preceding sentence.
+
+    Example:
+        >>> split_into_sentences("Hello world. Goodbye!")
+        ["Hello world.", "Goodbye!"]
+    """
+    sentences: list[str] = []
+    buffer: list[str] = []
+
+    for char in text.strip():
+        buffer.append(char)
+        if char in SENTENCE_END:
+            sentence = "".join(buffer).strip()
+            if sentence:
+                sentences.append(sentence)
+            buffer = []
+
+    remaining = "".join(buffer).strip()
+    if remaining:
+        sentences.append(remaining)
+
+    return sentences
 
 
-def chunk_15_30(
-    text: str,
-    min_s: float = 15.0,
-    max_s: float = 30.0,
-) -> list[str]:
-    sents = split_sentences(text)
-    durs = [est_seconds(s) for s in sents]
-    n, chunks = len(sents), []
-    i = 0
-    while i < n:
-        legal, acc = [], 0.0
-        for j in range(i, n):
-            acc += durs[j]
-            if min_s < acc < max_s:
-                legal.append(j)
-            if acc >= max_s:
-                break
-        if legal:
-            j = max(legal)
-        else:
-            acc = 0.0
-            j = i
-            while j < n and acc < min_s:
-                acc += durs[j]
-                j += 1
-            j -= 1
-        chunks.append(" ".join(sents[i : j + 1]))
-        i = j + 1
-    return chunks
-
-
-def concat_with_gap(
-    wavs: list[np.ndarray],
-    gap_ms: float = 250,
-    sr: int = 24000,
-) -> np.ndarray:
-    gap = np.zeros(int(sr * gap_ms / 1000), dtype=wavs[0].dtype)
-    out = [wavs[0]]
-    for w in wavs[1:]:
-        out.extend([gap, w])
-    return np.concatenate(out)
-
-
-def generate_with_debug(
+def generate_one_sentence_at_a_time(
     model: Any,
     text: str,
     ref_audio: Any,
-    ref_text: str | None,
+    ref_text: str | None = None,
     instruct: str | None = None,
-    gap_ms: float = 250,
-    debug_dir: str | None = None,
-    mode: str = "clone",
-    language: str | None = None,
-    generation_config: OmniVoiceGenerationConfig | None = None,
-    speed: float | None = None,
-    duration: float | None = None,
-) -> tuple[np.ndarray, list[dict[str, Any]], str]:
-    if debug_dir is None:
-        from datetime import datetime
+    postprocess_output: bool = True,
+) -> list[np.ndarray]:
+    """Generate audio by calling ``model.generate`` once per sentence.
 
-        debug_dir = f"/kaggle/working/debug_chunks/{datetime.now().strftime('run_%H%M%S')}"
-    os.makedirs(debug_dir, exist_ok=True)
+    OmniVoice's built-in long-form mode uses ``audio_chunk_duration`` and
+    ``audio_chunk_threshold`` for duration-based chunking.  By sending one
+    sentence per call and setting ``audio_chunk_threshold`` to a very high
+    value, we bypass that behaviour entirely.
+    """
+    sentences = split_into_sentences(text)
 
-    chunks = chunk_15_30(text)
-    rows: list[dict[str, Any]] = []
-    wavs: list[np.ndarray] = []
+    if not sentences:
+        raise ValueError("No usable text was provided.")
 
-    for k, c in enumerate(chunks):
-        est = est_seconds(c)
-        t0 = time.time()
-        kw: dict[str, Any] = dict(
-            text=c,
-            generation_config=generation_config,
+    sentence_wavs: list[np.ndarray] = []
+
+    for index, sentence in enumerate(sentences):
+        print(f"Generating sentence {index + 1}/{len(sentences)}:")
+        print(sentence)
+
+        kwargs: dict[str, Any] = {
+            "text": sentence,
+            "ref_audio": ref_audio,
+            "ref_text": ref_text,
+            "audio_chunk_threshold": 1e9,
+            "postprocess_output": postprocess_output,
+        }
+
+        if instruct:
+            kwargs["instruct"] = instruct
+
+        result = model.generate(**kwargs)
+
+        # OmniVoice may return [audio] or audio depending on the version.
+        if isinstance(result, (list, tuple)):
+            audio = result[0]
+        else:
+            audio = result
+
+        if hasattr(audio, "detach"):
+            audio = audio.detach().cpu().numpy()
+
+        audio = np.asarray(audio, dtype=np.float32).squeeze()
+        sentence_wavs.append(audio)
+
+        print(
+            f"Sentence {index + 1} audio duration: "
+            f"{len(audio) / SAMPLE_RATE:.2f} seconds"
         )
-        if language:
-            kw["language"] = language
-        if speed is not None and float(speed) != 1.0:
-            kw["speed"] = float(speed)
-        if duration is not None and float(duration) > 0:
-            kw["duration"] = float(duration)
-        if mode == "clone":
-            if ref_audio is None:
-                raise ValueError("ref_audio is required for voice cloning.")
-            prompt = model.create_voice_clone_prompt(
-                ref_audio=ref_audio,
-                ref_text=ref_text,
-            )
-            kw["voice_clone_prompt"] = prompt
-        elif mode == "design":
-            if instruct and instruct.strip():
-                kw["instruct"] = instruct.strip()
 
-        audio = model.generate(**kw)
-        wav = np.asarray(
-            audio[0] if isinstance(audio, (list, tuple)) else audio,
-            dtype=np.float32,
-        )
-        if hasattr(wav, "numpy"):
-            wav = wav.numpy()
-        wav = wav.squeeze().astype(np.float32)
-        actual = len(wav) / 24000
-        wavs.append(wav)
+    return sentence_wavs
 
-        path = os.path.join(debug_dir, f"chunk_{k:02d}.wav")
-        sf.write(path, wav, 24000)
 
-        flag = "" if 15 < actual < 30 else "  WARN OUT OF RANGE"
+def join_sentence_audio(
+    sentence_wavs: list[np.ndarray],
+    sample_rate: int = SAMPLE_RATE,
+    gap_ms: int = 250,
+) -> np.ndarray:
+    """Concatenate sentence waveforms with a silent gap between them."""
+    if not sentence_wavs:
+        raise ValueError("No generated audio found.")
+
+    gap_length = int(sample_rate * gap_ms / 1000)
+    gap = np.zeros(gap_length, dtype=np.float32)
+
+    pieces: list[np.ndarray] = []
+
+    for index, audio in enumerate(sentence_wavs):
+        if index > 0:
+            pieces.append(gap)
+        pieces.append(audio)
+
+    return np.concatenate(pieces)
+
+
+def tts_handler(
+    model: Any,
+    text: str,
+    ref_audio: Any,
+    ref_text: str | None = None,
+    instruct: str | None = None,
+    gap_ms: int = 250,
+) -> tuple[tuple[int, np.ndarray], list[list[Any]]]:
+    """One-shot handler that generates per-sentence and stitches the result.
+
+    Returns ``((sample_rate, audio), rows)`` where ``rows`` is a list of
+    ``[sentence_number, duration_seconds, "sentence"]`` entries.
+    """
+    text = normalize_punct(text)
+    sentence_wavs = generate_one_sentence_at_a_time(
+        model=model,
+        text=text,
+        ref_audio=ref_audio,
+        ref_text=ref_text,
+        instruct=instruct,
+    )
+
+    final_audio = join_sentence_audio(
+        sentence_wavs,
+        sample_rate=SAMPLE_RATE,
+        gap_ms=gap_ms,
+    )
+
+    rows: list[list[Any]] = []
+    for index, audio in enumerate(sentence_wavs):
         rows.append(
-            {
-                "chunk": k,
-                "est_s": round(est, 1),
-                "actual_s": round(actual, 2),
-                "gen_time_s": round(time.time() - t0, 1),
-                "text_preview": c[:60] + ("…" if len(c) > 60 else ""),
-                "file": path,
-                "flag": flag,
-            }
+            [
+                index + 1,
+                round(len(audio) / SAMPLE_RATE, 2),
+                "sentence",
+            ]
         )
 
-    final = concat_with_gap(wavs, gap_ms=gap_ms)
-    final_path = os.path.join(debug_dir, "final_stitched.wav")
-    sf.write(final_path, final, 24000)
-
-    with open(os.path.join(debug_dir, "manifest.json"), "w") as f:
-        json.dump(rows, f, indent=2, ensure_ascii=False)
-
-    return final, rows, debug_dir
+    return (SAMPLE_RATE, final_audio), rows
