@@ -1031,6 +1031,7 @@ class OmniVoice(PreTrainedModel):
                     .audio_values[0]
                     .cpu()
                     .numpy()
+                    .squeeze(0)
                 )
                 dur = len(decoded) / self.sampling_rate
                 logger.info(f"Item {item_idx} chunk {chunk_idx}: est={est:.1f}s actual={dur:.1f}s")
