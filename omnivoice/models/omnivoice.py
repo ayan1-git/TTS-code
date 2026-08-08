@@ -761,6 +761,19 @@ class OmniVoice(PreTrainedModel):
             waveform, sr = ref_audio
             if isinstance(waveform, torch.Tensor):
                 waveform = waveform.cpu().numpy()
+            # The documented contract is (waveform, sample_rate). A common
+            # mistake — e.g. passing a Gradio ``type="numpy"`` result back to
+            # this method — is the swapped ``(sample_rate, waveform)`` ordering,
+            # which leaves the int sample rate in ``waveform`` and crashes
+            # below with an opaque ``'int' object has no attribute 'ndim'``.
+            if not isinstance(waveform, np.ndarray):
+                raise ValueError(
+                    "ref_audio as a tuple must be (waveform, sample_rate) with "
+                    "a numpy/torch audio array as the first element; got first "
+                    f"element of type {type(waveform).__name__}. Pass a file "
+                    "path (str) or a (waveform_array, sample_rate) tuple. For "
+                    "Gradio Audio, set type='filepath'."
+                )
             if waveform.ndim == 1:
                 waveform = waveform[np.newaxis, :]
             if waveform.shape[0] > 1:
