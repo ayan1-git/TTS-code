@@ -32,6 +32,7 @@ import logging
 import math
 import os
 import re
+import soundfile as sf
 from dataclasses import dataclass, fields
 from functools import partial
 from typing import Any, List, Optional, Union
@@ -72,6 +73,7 @@ from omnivoice.utils.lang_map import LANG_IDS, LANG_NAMES
 from omnivoice.utils.text import (
     add_punctuation,
     chunk_text_punctuation,
+    est_seconds,
     normalize_text as _normalize_text,
 )
 from omnivoice.utils.voice_design import (
@@ -1018,6 +1020,21 @@ class OmniVoice(PreTrainedModel):
                     ref_audios=[first_chunk_map[i] for i in indices],
                     ref_texts=[all_chunks[i][0] for i in indices],
                 )
+
+        for item_idx in range(task.batch_size):
+            for chunk_idx, (tokens, chunk_text) in enumerate(
+                zip(chunk_results[item_idx], all_chunks[item_idx])
+            ):
+                est = est_seconds(chunk_text)
+                decoded = (
+                    self.audio_tokenizer.decode(tokens.to(self.audio_tokenizer.device).unsqueeze(0))
+                    .audio_values[0]
+                    .cpu()
+                    .numpy()
+                )
+                dur = len(decoded) / self.sampling_rate
+                logger.info(f"Item {item_idx} chunk {chunk_idx}: est={est:.1f}s actual={dur:.1f}s")
+                sf.write(f"debug_item{item_idx}_chunk{chunk_idx}.wav", decoded, self.sampling_rate)
 
         return chunk_results
 
