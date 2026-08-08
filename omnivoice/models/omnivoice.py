@@ -1035,7 +1035,7 @@ class OmniVoice(PreTrainedModel):
                     .astype(np.float32)
                 )
                 dur = len(decoded) / self.sampling_rate
-                logger.info(f"Item {item_idx} chunk {chunk_idx}: est={est:.1f}s actual={dur:.1f}s")
+                print(f"Item {item_idx} chunk {chunk_idx}: est={est:.1f}s actual={dur:.1f}s")
                 torchaudio.save(f"debug_item{item_idx}_chunk{chunk_idx}.wav", torch.from_numpy(decoded).unsqueeze(0), self.sampling_rate)
 
         return chunk_results
