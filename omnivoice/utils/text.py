@@ -27,12 +27,12 @@ Provides:
 
 import logging
 import re
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-SPLIT_PUNCTUATION = set(".,;:!?。，；：！？")
+SPLIT_PUNCTUATION = set(".!?。！？")
 CLOSING_MARKS = set("\"'“”‘’）]》>」】")
 
 END_PUNCTUATION = {
@@ -131,43 +131,10 @@ def chunk_text_punctuation(
     Splits the input tokens list into chunks according to punctuations,
     avoiding splits on common abbreviations (e.g., Mr., No.).
     """
-
-    # 1. Split the tokens according to punctuations.
-    sentences = []
-    current_sentence = []
-
-    tokens_list = list(text)
-
-    for token in tokens_list:
-        # If the first token of current sentence is punctuation,
-        # append it to the end of the previous sentence.
-        if (
-            len(current_sentence) == 0
-            and len(sentences) != 0
-            and (token in SPLIT_PUNCTUATION or token in CLOSING_MARKS)
-        ):
-            sentences[-1].append(token)
-        # Otherwise, append the current token to the current sentence.
-        else:
-            current_sentence.append(token)
-
-            # Split the sentence in positions of punctuations.
-            if token in SPLIT_PUNCTUATION:
-                is_abbreviation = False
-
-                if token == ".":
-                    temp_str = "".join(current_sentence).strip()
-                    if temp_str:
-                        last_word = temp_str.split()[-1]
-                        if last_word in ABBREVIATIONS:
-                            is_abbreviation = True
-
-                if not is_abbreviation:
-                    sentences.append(current_sentence)
-                    current_sentence = []
-    # Assume the last few tokens are also a sentence
-    if len(current_sentence) != 0:
-        sentences.append(current_sentence)
+    sentence_strings = split_sentences(text)
+    sentences = [list(s) for s in sentence_strings]
+    if not sentences:
+        return []
 
     # 2. Merge short sentences.
     merged_chunks = []
@@ -208,6 +175,99 @@ def chunk_text_punctuation(
         "".join(chunk).strip() for chunk in final_chunks if "".join(chunk).strip()
     ]
     return chunk_strings
+
+
+SENT_END = {".", "!", "?", "。", "！", "？"}
+
+
+def split_sentences(text: str) -> List[str]:
+    """Split text into sentences at true sentence boundaries.
+
+    Reuses the same abbreviation-aware logic as ``chunk_text_punctuation``,
+    so common abbreviations like ``Mr.`` and similar constructs are not
+    treated as sentence terminators.
+    """
+    sentences: List[str] = []
+    current_sentence: List[str] = []
+
+    for token in text:
+        if (
+            len(current_sentence) == 0
+            and len(sentences) != 0
+            and (token in SPLIT_PUNCTUATION or token in CLOSING_MARKS)
+        ):
+            sentences[-1] += token
+        else:
+            current_sentence.append(token)
+
+            if token in SPLIT_PUNCTUATION:
+                is_abbreviation = False
+                if token == ".":
+                    temp_str = "".join(current_sentence).strip()
+                    if temp_str:
+                        last_word = temp_str.split()[-1]
+                        if last_word in ABBREVIATIONS:
+                            is_abbreviation = True
+                if not is_abbreviation:
+                    sentences.append("".join(current_sentence))
+                    current_sentence = []
+    if current_sentence:
+        sentences.append("".join(current_sentence))
+    return [s.strip() for s in sentences if s.strip()]
+
+
+def est_seconds(text: str, cps: float = 14.0) -> float:
+    """
+    Duration estimate. Calibrate ``cps`` (chars/sec) per language/voice:
+    ~13-15 for English; for Chinese use ~4-5 chars/sec instead.
+    """
+    return len(text.replace(" ", "")) / cps
+
+
+def chunk_20_30(
+    text: str,
+    min_s: float = 20.0,
+    max_s: float = 30.0,
+    cps: float = 14.0,
+) -> Tuple[List[str], List[tuple]]:
+    """
+    Partition ``text`` into chunks with estimated duration strictly in
+    ``(min_s, max_s)``, cutting ONLY at sentence terminators.
+
+    Returns ``(chunks, violations)`` where ``violations`` is a list of
+    ``(segment, duration)`` tuples for chunks that fall outside the target
+    window.
+    """
+    sents = split_sentences(text)
+    durs = [est_seconds(s, cps) for s in sents]
+    n = len(sents)
+    chunks: List[str] = []
+    violations: List[tuple] = []
+
+    i = 0
+    while i < n:
+        legal, acc = [], 0.0
+        for j in range(i, n):
+            acc += durs[j]
+            if min_s < acc < max_s:
+                legal.append(j)
+            if acc >= max_s:
+                break
+        if legal:
+            j = max(legal)
+            chunks.append(" ".join(sents[i : j + 1]))
+            i = j + 1
+        else:
+            acc = 0.0
+            j = i
+            while j < n and acc < min_s:
+                acc += durs[j]
+                j += 1
+            seg = " ".join(sents[i:j])
+            chunks.append(seg)
+            violations.append((seg, round(acc, 1)))
+            i = j
+    return chunks, violations
 
 
 def add_punctuation(text: str):
