@@ -182,6 +182,11 @@ class OmniVoiceGenerationConfig:
     layer_penalty_factor: float = 5.0
     position_temperature: float = 5.0
     class_temperature: float = 0.0
+    # Sampling filters. ``top_p = 1.0`` and ``top_k = 0`` are no-ops, so they
+    # only take effect when the user opts into non-greedy (``class_temperature > 0``)
+    # sampling. They are only consulted by the iterative decoder's sampling branch.
+    top_p: float = 1.0
+    top_k: int = 0
     denoise: bool = True
     preprocess_prompt: bool = True
     postprocess_output: bool = True
@@ -1490,7 +1495,15 @@ class OmniVoice(PreTrainedModel):
         log_probs[..., self.config.audio_mask_id] = -float("inf")
 
         if gen_config.class_temperature > 0.0:
-            filtered_probs = _filter_top_k(log_probs, ratio=0.1)
+            # When the user has not opted into custom filtering, keep the
+            # original behaviour (a fixed 0.1 ratio pre-filter). User-specified
+            # top_k / top_p replace that ratio filter so the sliders are the
+            # single source of truth for the candidate set.
+            if gen_config.top_p >= 1.0 and gen_config.top_k <= 0:
+                filtered_probs = _filter_top_k(log_probs, ratio=0.1)
+            else:
+                filtered_probs = _apply_top_k(log_probs, gen_config.top_k)
+                filtered_probs = _apply_top_p(filtered_probs, gen_config.top_p)
             pred_tokens = _gumbel_sample(
                 filtered_probs, gen_config.class_temperature
             ).argmax(dim=-1)
@@ -1684,6 +1697,43 @@ def _gumbel_sample(logits: torch.Tensor, temperature: float) -> torch.Tensor:
     u = torch.rand_like(scaled_logits)
     gumbel_noise = -torch.log(-torch.log(u + 1e-10) + 1e-10)
     return scaled_logits + gumbel_noise
+
+
+def _apply_top_k(logits: torch.Tensor, k: int) -> torch.Tensor:
+    """Keep only the top-``k`` logits along the last dimension.
+
+    No-op when ``k <= 0`` (the default), so existing call sites keep their
+    behaviour. Operates on already-masked (e.g. ratio-filtered) logits: a
+    ``-inf`` position can never survive a top-k selection.
+    """
+    if k is None or k <= 0:
+        return logits
+    k = min(int(k), logits.shape[-1])
+    val, ind = logits.topk(k, dim=-1)
+    out = torch.full_like(logits, float("-inf"))
+    out.scatter_(-1, ind, val)
+    return out
+
+
+def _apply_top_p(logits: torch.Tensor, p: float) -> torch.Tensor:
+    """Nucleus (top-p) filtering along the last dimension.
+
+    No-op when ``p >= 1.0`` (the default). ``logits`` are expected to be
+    log-probabilities; positions already set to ``-inf`` (e.g. by the ratio
+    filter) contribute 0 probability and are naturally excluded.
+    """
+    if p >= 1.0:
+        return logits
+    probs = torch.softmax(logits, dim=-1)
+    sorted_probs, sorted_idx = torch.sort(probs, descending=True, dim=-1)
+    cum_probs = torch.cumsum(sorted_probs, dim=-1)
+    # Keep the smallest set of tokens whose cumulative probability exceeds p.
+    cutoff_mask = cum_probs <= p
+    # Always retain the single most probable token (standard nucleus edge case).
+    cutoff_mask[..., 0] = True
+    kept = torch.zeros_like(cutoff_mask)
+    kept.scatter_(-1, sorted_idx, cutoff_mask)
+    return torch.where(kept, logits, torch.full_like(logits, float("-inf")))
 
 
 def _get_time_steps(
