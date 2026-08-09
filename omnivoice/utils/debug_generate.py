@@ -9,7 +9,6 @@ separate call with ``audio_chunk_threshold`` set very high.
 
 import json
 import os
-import re
 import time
 from typing import Any
 
@@ -22,21 +21,6 @@ from omnivoice import OmniVoiceGenerationConfig
 SAMPLE_RATE = 24000
 
 SENTENCE_END = {".", "!", "?", "。", "！", "？"}
-
-
-def normalize_punct(text: str) -> str:
-    """Insert a space before every sentence terminator.
-
-    This ensures that when the splitter sees ``word .`` it treats the space
-    as a token boundary, making the sentence-level experiment independent
-    of tokenizer-specific spacing behaviour.
-
-    Example::
-
-        >>> normalize_punct("Hello. Next!")
-        'Hello . Next !'
-    """
-    return re.sub(r"\s*([.!?。！？])", r" \1", text)
 
 
 def split_into_sentences(text: str) -> list[str]:
@@ -158,9 +142,8 @@ def tts_handler(
     """One-shot handler that generates per-sentence and stitches the result.
 
     Returns ``((sample_rate, audio), rows)`` where ``rows`` is a list of
-    ``[sentence_number, duration_seconds, "sentence"]`` entries.
+     ``[sentence_number, duration_seconds, "sentence"]`` entries.
     """
-    text = normalize_punct(text)
     sentence_wavs = generate_one_sentence_at_a_time(
         model=model,
         text=text,
