@@ -225,19 +225,9 @@ def fade_and_pad_audio(
     if audio.shape[-1] == 0:
         return audio
 
-    fade_samples = int(fade_duration * sample_rate)
     pad_samples = int(pad_duration * sample_rate)
 
     processed = audio.copy()
-
-    if fade_samples > 0:
-        k = min(fade_samples, processed.shape[-1] // 2)
-        if k > 0:
-            fade_in = np.linspace(0, 1, k, dtype=np.float32)[np.newaxis, :]
-            processed[..., :k] *= fade_in
-
-            fade_out = np.linspace(1, 0, k, dtype=np.float32)[np.newaxis, :]
-            processed[..., -k:] *= fade_out
 
     if pad_samples > 0:
         silence = np.zeros(
